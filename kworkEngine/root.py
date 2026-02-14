@@ -1,86 +1,135 @@
-import logging
 import asyncio
 import configparser
+import html
+import logging
+import json
+from pathlib import Path
 
 from kwork import Kwork
 from telegram import Bot
 
 logging.basicConfig(level=logging.INFO)
+
 config = configparser.ConfigParser(interpolation=None)
-config.read('config.ini')
+config.read("config.ini")
 
-GROUP_CHAT_ID = config.get('Credentials', 'GROUP_ID')
-TELEGRAM_TOKEN = config.get('Credentials', 'TELEGRAM_TOKEN')
-LOGIN = config.get('Credentials', 'LOGIN')
-PASSWORD = config.get('Credentials', 'PASSWORD')
+GROUP_CHAT_ID = int(config.get("Credentials", "GROUP_ID"))
+TELEGRAM_TOKEN = config.get("Credentials", "TELEGRAM_TOKEN")
+LOGIN = config.get("Credentials", "LOGIN")
+PASSWORD = config.get("Credentials", "PASSWORD")
 
-last_project_id = None
+CATEGORIES_IDS = [41, 80, 40, 255, 81]
+POLL_INTERVAL_SECONDS = 60
 
-def clean_description(description):
+STATE_FILE = Path("state.json")
 
-    description = description.replace('<br>', '\n')
-    description = description.replace('-&gt;', '>')  # >
-    description = description.replace('&lt;', '<')  # <
-    description = description.replace('&amp;', '&')  # &
-    description = description.replace('&quot;', '"')  # "
-    description = description.replace('&apos;', "'")  # '
 
-    return description
+def clean_text(text: str) -> str:
+    """Convert basic HTML formatting/entities into plain text."""
+    if not text:
+        return ""
+    text = text.replace("<br>", "\n")
+    return html.unescape(text)
 
-async def track_new_projects(api, bot):
 
-    global last_project_id
+def offers_label(offers_count: int) -> str:
+    if offers_count < 5:
+        return " ( Actual! )"
+    if offers_count <= 10:
+        return " ( 50/50 actual :/ )"
+    return " ( Maybe not actual :( )"
 
-    projects = await api.get_projects(categories_ids=[41, 80, 40, 255, 81])
 
-    if projects:
+def load_last_seen_project_id() -> int | None:
+    if not STATE_FILE.exists():
+        return None
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        value = data.get("last_seen_project_id")
+        return int(value) if value is not None else None
+    except Exception:
+        return None
 
-        first_project = projects[0]
 
-        offers_text = (
-            " ( Actual! )" if first_project.offers < 5 else
-            " ( 50/50 actual :/ )" if first_project.offers <= 10 else
-            " ( Maybe not actual :( )"
-        )
+def save_last_seen_project_id(project_id: int) -> None:
+    STATE_FILE.write_text(
+        json.dumps({"last_seen_project_id": project_id}, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
-        cleaned_description = clean_description(first_project.description)
-        cleaned_title = clean_description(first_project.title)
 
-        await bot.send_message(GROUP_CHAT_ID,
-                               f"New Project:\nTitle: {cleaned_title}, Price: {first_project.price}₽, Description: {cleaned_description}\nResponses: {first_project.offers}{offers_text}\nLink: https://kwork.ru/projects/{first_project.id}/view")
-        last_project_id = first_project.id
+async def send_project_to_telegram(telegram_bot: Bot, project) -> None:
+    title = clean_text(getattr(project, "title", ""))
+    description = clean_text(getattr(project, "description", ""))
+
+    # Prevent Telegram "message too long" errors (safe-ish cap)
+    if len(description) > 2500:
+        description = description[:2500] + "…"
+
+    offers = int(getattr(project, "offers", 0))
+    price = getattr(project, "price", "")
+    project_id = getattr(project, "id", "")
+
+    message = (
+        "New Project:\n"
+        f"Title: {title}\n"
+        f"Price: {price}₽\n"
+        f"Description:\n{description}\n\n"
+        f"Responses: {offers}{offers_label(offers)}\n"
+        f"Link: https://kwork.ru/projects/{project_id}/view"
+    )
+
+    await telegram_bot.send_message(chat_id=GROUP_CHAT_ID, text=message)
+
+
+async def poll_new_projects(kwork_api: Kwork, telegram_bot: Bot) -> None:
+    last_seen_project_id = load_last_seen_project_id()
+
+    # Initialize state without sending (avoid spam on restarts)
+    if last_seen_project_id is None:
+        projects = await kwork_api.get_projects(categories_ids=CATEGORIES_IDS)
+        if projects:
+            last_seen_project_id = projects[0].id
+            save_last_seen_project_id(last_seen_project_id)
+            logging.info("Initialized last_seen_project_id=%s", last_seen_project_id)
+
+    backoff = POLL_INTERVAL_SECONDS
 
     while True:
-        projects = await api.get_projects(categories_ids=[41, 80, 40, 255, 81])
+        try:
+            projects = await kwork_api.get_projects(categories_ids=CATEGORIES_IDS)
 
-        if projects:
-            current_project_id = projects[0].id
-            if current_project_id != last_project_id:
+            if projects:
+                # projects assumed sorted newest -> oldest
+                unseen_projects = []
+                for project in projects:
+                    if project.id == last_seen_project_id:
+                        break
+                    unseen_projects.append(project)
 
-                last_project_id = current_project_id
-                new_project = projects[0]
+                # send in chronological order (oldest unseen -> newest)
+                for project in reversed(unseen_projects):
+                    await send_project_to_telegram(telegram_bot, project)
+                    last_seen_project_id = project.id
+                    save_last_seen_project_id(last_seen_project_id)
 
-                offers_text = (
-                    " ( Actual! )" if first_project.offers < 5 else
-                    " ( 50/50 actual :/ )" if first_project.offers <= 10 else
-                    " ( Maybe not actual :( )"
-                )
+            backoff = POLL_INTERVAL_SECONDS
+        except Exception as exc:
+            logging.exception("Polling error: %s", exc)
+            backoff = min(backoff * 2, 300)  # exponential backoff up to 5 min
 
-                cleaned_description = clean_description(new_project.description)
-                cleaned_title = clean_description(new_project.title)
+        await asyncio.sleep(backoff)
 
-                await bot.send_message(GROUP_CHAT_ID,
-                                       f"New Project:\nTitle: {cleaned_title}, Price: {first_project.price}₽, Description: {cleaned_description}\nResponses: {first_project.offers}{offers_text}\nLink: https://kwork.ru/projects/{first_project.id}/view")
-        await asyncio.sleep(60)
 
-async def main():
+async def main() -> None:
+    kwork_api = Kwork(LOGIN, PASSWORD)
+    telegram_bot = Bot(token=TELEGRAM_TOKEN)
 
-    api = Kwork(LOGIN, PASSWORD)
-    bot = Bot(token=TELEGRAM_TOKEN)
+    try:
+        await poll_new_projects(kwork_api, telegram_bot)
+    finally:
+        await kwork_api.close()
 
-    await track_new_projects(api, bot)
-
-    await api.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
