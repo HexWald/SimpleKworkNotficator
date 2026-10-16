@@ -1,103 +1,49 @@
-# 📦 Simple Kwork Notifier
+# Simple Kwork Notifier
 
-Telegram bot that monitors new projects on Kwork and sends notifications
-to a Telegram group chat.
+A Python bot that checks selected Kwork categories and sends new projects to a Telegram group.
 
-------------------------------------------------------------------------
+## How it works
 
-## 🚀 Features
+Each poll processes the whole returned list, oldest project first. IDs are remembered after Telegram accepts the message. Overlapping polls and repeated IDs in the same response are skipped.
 
--   Tracks latest Kwork projects by category
--   Sends formatted notifications to Telegram
--   Async polling
--   Clean modular project structure
--   Config-based credentials
--   Logging support
+If sending fails, the failed project stays unacknowledged and can be retried on the next poll. Projects already delivered during that batch are skipped. A failed project must still be present in a later Kwork response to be retried.
 
-------------------------------------------------------------------------
+The last 2048 delivered IDs are kept in memory. Restarting clears this history, so the initial batch can be sent again. A timeout after Telegram accepted a message can also cause a duplicate on retry. This is not an exactly-once delivery service.
 
-## 🏗 Project Structure
+## Setup
 
-    .
-    ├── src/
-    │   └── kwork_notifier/
-    │       ├── __init__.py
-    │       ├── main.py
-    │       ├── tracker.py
-    │       ├── formatting.py
-    │       └── settings.py
-    ├── config.example.ini
-    ├── requirements.txt
-    └── README.md
+Use Python 3.10 or newer.
 
-------------------------------------------------------------------------
+```sh
+python -m venv .venv
+# Linux / macOS
+source .venv/bin/activate
+# Windows
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-## ⚙️ Installation
+Copy `config.example.ini` to `config.ini` and fill in the Kwork login, Telegram token and group ID. Keep `config.ini` out of Git.
 
-### 1️⃣ Clone repository
+Run from the repository root:
 
-    git clone https://github.com/HexWald/SimpleKworkNotficator.git
-    cd SimpleKworkNotficator
+```sh
+python -m src.kwork_notifier.main
+```
 
-### 2️⃣ Create virtual environment
+## Tests
 
-    python -m venv .venv
-    source .venv/bin/activate
+```sh
+python -m unittest discover -s tests -v
+```
 
-### 3️⃣ Install dependencies
+Tests use a fake bot and API. They do not load credentials or send real messages.
 
-    pip install -r requirements.txt
+## Files
 
-------------------------------------------------------------------------
+- `tracker.py`: polling, delivery history and sending.
+- `formatting.py`: message text and response activity labels.
+- `settings.py`: configuration.
+- `main.py`: application startup and logging.
 
-## 🔑 Configuration
-
-Create `config.ini` based on `config.example.ini`:
-
-    [Credentials]
-    GROUP_ID = -100XXXXXXXXXX
-    TELEGRAM_TOKEN = your_telegram_bot_token
-    LOGIN = your_kwork_login
-    PASSWORD = your_kwork_password
-
-⚠️ `config.ini` must NOT be committed to the repository.
-
-------------------------------------------------------------------------
-
-## ▶️ Run
-
-From project root:
-
-    python -m src.kwork_notifier.main
-
-Or if using **main** entrypoint:
-
-    python -m kwork_notifier
-
-------------------------------------------------------------------------
-
-## 🧠 How It Works
-
--   Polls Kwork API every 60 seconds
--   Compares latest project ID
--   Sends notification if a new project appears
--   Formats HTML-like description text
--   Adds response activity label
-
-------------------------------------------------------------------------
-
-## 🛡 Security Notice
-
-Never commit:
-
--   config.ini
--   API tokens
--   passwords
-
-If credentials were exposed, revoke them immediately.
-
-------------------------------------------------------------------------
-
-## 📄 License
-
-MIT
+MIT license.
