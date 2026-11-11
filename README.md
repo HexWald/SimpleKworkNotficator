@@ -10,6 +10,8 @@ If sending fails, the failed project stays unacknowledged and can be retried on 
 
 The last 2048 delivered IDs per Telegram group are saved in `deliveries.sqlite3` beside `config.ini`. Keep this file when restarting or updating the bot. A timeout after Telegram accepted a message can still cause a duplicate on retry.
 
+Long messages are shortened to fit Telegram's limit while keeping the project link.
+
 ## Setup
 
 Use Python 3.10 or newer.

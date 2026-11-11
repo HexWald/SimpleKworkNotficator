@@ -82,6 +82,21 @@ class TrackerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await send_new_projects([], bot, -42, self.history), 0)
         self.assertEqual(bot.messages, [])
 
+    async def test_long_messages_keep_the_link_and_fit_telegram(self):
+        bot = FakeBot()
+        long_description = project(1)
+        long_description.description = "🔧" * 4096
+        long_title = project(2)
+        long_title.title = "🔧" * 4096
+        await send_new_projects([long_description, long_title], bot, -42, self.history)
+
+        self.assertEqual(len(bot.messages), 2)
+        for project_id, (_, message) in enumerate(bot.messages, 1):
+            self.assertLessEqual(len(message.encode("utf-16-le")) // 2, 4096)
+            self.assertIn("…", message)
+            self.assertIn("Price: 5000₽", message)
+            self.assertTrue(message.endswith(f"https://kwork.ru/projects/{project_id}/view"))
+
     async def test_polling_recovers_from_a_send_failure(self):
         bot = FakeBot(fail_once_for=2)
         api = SimpleNamespace(get_projects=AsyncMock(return_value=[project(1), project(2), project(3)]))
