@@ -11,6 +11,7 @@ class Settings:
 
     categories_ids: tuple[int, ...] = (41, 80, 40, 255, 81)
     poll_interval_seconds: int = 60
+    history_path: Path = Path("deliveries.sqlite3")
 
 def load_settings(config_path: str = "config.ini") -> Settings:
     p = Path(config_path)
@@ -28,4 +29,5 @@ def load_settings(config_path: str = "config.ini") -> Settings:
         telegram_token=config.get("Credentials", "TELEGRAM_TOKEN"),
         login=config.get("Credentials", "LOGIN"),
         password=config.get("Credentials", "PASSWORD"),
+        history_path=p.resolve().with_name("deliveries.sqlite3"),
     )

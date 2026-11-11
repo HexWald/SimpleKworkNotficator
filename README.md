@@ -8,7 +8,7 @@ Each poll processes the whole returned list, oldest project first. IDs are remem
 
 If sending fails, the failed project stays unacknowledged and can be retried on the next poll. Projects already delivered during that batch are skipped. A failed project must still be present in a later Kwork response to be retried.
 
-The last 2048 delivered IDs are kept in memory. Restarting clears this history, so the initial batch can be sent again. A timeout after Telegram accepted a message can also cause a duplicate on retry. This is not an exactly-once delivery service.
+The last 2048 delivered IDs per Telegram group are saved in `deliveries.sqlite3` beside `config.ini`. Keep this file when restarting or updating the bot. A timeout after Telegram accepted a message can still cause a duplicate on retry.
 
 ## Setup
 

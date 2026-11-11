@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import deque
+import sqlite3
+from contextlib import closing
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .formatting import build_message
@@ -16,23 +18,46 @@ logger = logging.getLogger("kwork-tracker")
 
 
 class DeliveryHistory:
-    def __init__(self, limit: int = 2048):
+    def __init__(self, limit: int = 2048, *, path: Path | None = None, chat_id: int = 0):
         if limit < 1:
             raise ValueError("History limit must be positive")
         self.limit = limit
-        self._ids = set()
-        self._order = deque()
+        self._chat_id = chat_id
+        self._db = sqlite3.connect(path if path is not None else ":memory:")
+        try:
+            self._db.execute("""
+                CREATE TABLE IF NOT EXISTS deliveries (
+                    sequence INTEGER PRIMARY KEY,
+                    chat_id INTEGER NOT NULL,
+                    project_id INTEGER NOT NULL,
+                    UNIQUE (chat_id, project_id)
+                )
+            """)
+        except sqlite3.Error:
+            self.close()
+            raise
 
     def __contains__(self, project_id: int) -> bool:
-        return project_id in self._ids
+        return self._db.execute(
+            "SELECT 1 FROM deliveries WHERE chat_id = ? AND project_id = ?",
+            (self._chat_id, project_id),
+        ).fetchone() is not None
 
     def remember(self, project_id: int) -> None:
-        if project_id in self._ids:
-            return
-        if len(self._order) == self.limit:
-            self._ids.remove(self._order.popleft())
-        self._order.append(project_id)
-        self._ids.add(project_id)
+        with self._db:
+            self._db.execute("""
+                INSERT INTO deliveries (chat_id, project_id) VALUES (?, ?)
+                ON CONFLICT (chat_id, project_id) DO NOTHING
+            """, (self._chat_id, project_id))
+            self._db.execute("""
+                DELETE FROM deliveries WHERE chat_id = ? AND sequence <= (
+                    SELECT sequence FROM deliveries WHERE chat_id = ?
+                    ORDER BY sequence DESC LIMIT 1 OFFSET ?
+                )
+            """, (self._chat_id, self._chat_id, self.limit))
+
+    def close(self) -> None:
+        self._db.close()
 
 
 async def send_new_projects(projects, bot: Bot, chat_id: int, history: DeliveryHistory) -> int:
@@ -49,19 +74,18 @@ async def send_new_projects(projects, bot: Bot, chat_id: int, history: DeliveryH
 
 
 async def track_new_projects(api: Kwork, bot: Bot, settings: Settings) -> None:
-    history = DeliveryHistory()
+    with closing(DeliveryHistory(path=settings.history_path, chat_id=settings.group_chat_id)) as history:
+        while True:
+            try:
+                projects = await api.get_projects(categories_ids=list(settings.categories_ids))
+                if projects:
+                    sent = await send_new_projects(projects, bot, settings.group_chat_id, history)
+                    logger.info("Poll complete: received=%s sent=%s", len(projects), sent)
+                else:
+                    logger.info("No projects found.")
+            except (asyncio.CancelledError, sqlite3.Error):
+                raise
+            except Exception:
+                logger.exception("Error while polling/sending")
 
-    while True:
-        try:
-            projects = await api.get_projects(categories_ids=list(settings.categories_ids))
-            if projects:
-                sent = await send_new_projects(projects, bot, settings.group_chat_id, history)
-                logger.info("Poll complete: received=%s sent=%s", len(projects), sent)
-            else:
-                logger.info("No projects found.")
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Error while polling/sending")
-
-        await asyncio.sleep(settings.poll_interval_seconds)
+            await asyncio.sleep(settings.poll_interval_seconds)

@@ -1,5 +1,9 @@
 import asyncio
+import sqlite3
 import unittest
+from contextlib import closing
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -26,9 +30,19 @@ class FakeBot:
 
 
 class TrackerTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.history = DeliveryHistory()
+        self.addCleanup(self.history.close)
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.settings = SimpleNamespace(
+            categories_ids=(5, 7), group_chat_id=-42, poll_interval_seconds=60,
+            history_path=Path(directory.name) / "deliveries.sqlite3",
+        )
+
     async def test_sends_the_whole_batch_in_id_order(self):
         bot = FakeBot()
-        sent = await send_new_projects([project(3), project(1), project(2), project(2)], bot, -42, DeliveryHistory())
+        sent = await send_new_projects([project(3), project(1), project(2), project(2)], bot, -42, self.history)
 
         self.assertEqual(sent, 3)
         for (chat_id, message), expected_id in zip(bot.messages, [1, 2, 3]):
@@ -37,7 +51,7 @@ class TrackerTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("First line\nSecond & third", message)
 
     async def test_overlapping_polls_do_not_resend_delivered_projects(self):
-        bot, history = FakeBot(), DeliveryHistory()
+        bot, history = FakeBot(), self.history
         await send_new_projects([project(1), project(2)], bot, -42, history)
         sent = await send_new_projects([project(2), project(3)], bot, -42, history)
 
@@ -45,7 +59,7 @@ class TrackerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bot.messages), 3)
 
     async def test_failed_send_can_be_retried_without_resending_successes(self):
-        bot, history = FakeBot(fail_once_for=2), DeliveryHistory()
+        bot, history = FakeBot(fail_once_for=2), self.history
         with self.assertRaises(ConnectionError):
             await send_new_projects([project(3), project(1), project(2)], bot, -42, history)
 
@@ -58,39 +72,73 @@ class TrackerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bot.messages), 3)
 
     async def test_cancellation_does_not_acknowledge_a_delivery(self):
-        bot, history = SimpleNamespace(send_message=AsyncMock(side_effect=asyncio.CancelledError)), DeliveryHistory()
+        bot = SimpleNamespace(send_message=AsyncMock(side_effect=asyncio.CancelledError))
         with self.assertRaises(asyncio.CancelledError):
-            await send_new_projects([project(1)], bot, -42, history)
-        self.assertNotIn(1, history)
+            await send_new_projects([project(1)], bot, -42, self.history)
+        self.assertNotIn(1, self.history)
 
     async def test_empty_batch_sends_nothing(self):
         bot = FakeBot()
-        self.assertEqual(await send_new_projects([], bot, -42, DeliveryHistory()), 0)
+        self.assertEqual(await send_new_projects([], bot, -42, self.history), 0)
         self.assertEqual(bot.messages, [])
 
     async def test_polling_recovers_from_a_send_failure(self):
         bot = FakeBot(fail_once_for=2)
         api = SimpleNamespace(get_projects=AsyncMock(return_value=[project(1), project(2), project(3)]))
-        settings = SimpleNamespace(categories_ids=(5, 7), group_chat_id=-42, poll_interval_seconds=60)
-
         with patch("src.kwork_notifier.tracker.asyncio.sleep", new=AsyncMock(side_effect=[None, asyncio.CancelledError])):
             with self.assertLogs("kwork-tracker", level="INFO"):
                 with self.assertRaises(asyncio.CancelledError):
-                    await track_new_projects(api, bot, settings)
+                    await track_new_projects(api, bot, self.settings)
 
         self.assertEqual(api.get_projects.await_count, 2)
         api.get_projects.assert_awaited_with(categories_ids=[5, 7])
         self.assertEqual(len(bot.messages), 3)
 
+    async def test_restarting_keeps_delivered_ids_for_the_same_chat(self):
+        api = SimpleNamespace(get_projects=AsyncMock(side_effect=[
+            [project(1), project(2)], [project(2), project(3)],
+        ]))
+        first, restarted = FakeBot(), FakeBot()
+        with patch("src.kwork_notifier.tracker.asyncio.sleep", side_effect=asyncio.CancelledError):
+            for bot in (first, restarted):
+                with self.assertRaises(asyncio.CancelledError):
+                    await track_new_projects(api, bot, self.settings)
+
+        self.assertEqual(len(first.messages), 2)
+        self.assertEqual(len(restarted.messages), 1)
+        self.assertIn("projects/3/view", restarted.messages[0][1])
+
+    async def test_history_write_failure_stops_the_poller(self):
+        api = SimpleNamespace(get_projects=AsyncMock(return_value=[project(1)]))
+        bot = FakeBot()
+        with patch.object(DeliveryHistory, "remember", side_effect=sqlite3.OperationalError("disk is full")):
+            with self.assertRaises(sqlite3.OperationalError):
+                await track_new_projects(api, bot, self.settings)
+
+        api.get_projects.assert_awaited_once()
+        self.assertEqual(len(bot.messages), 1)
+
+
 
 class HistoryTest(unittest.TestCase):
     def test_keeps_only_the_last_delivered_ids(self):
-        history = DeliveryHistory(limit=3)
-        for project_id in [1, 2, 2, 3, 4]:
-            history.remember(project_id)
-        self.assertNotIn(1, history)
-        for project_id in [2, 3, 4]:
-            self.assertIn(project_id, history)
+        with closing(DeliveryHistory(limit=3)) as history:
+            for project_id in [1, 2, 2, 3, 4]:
+                history.remember(project_id)
+            self.assertNotIn(1, history)
+            for project_id in [2, 3, 4]:
+                self.assertIn(project_id, history)
+
+    def test_groups_have_separate_delivery_history(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "deliveries.sqlite3"
+            with closing(DeliveryHistory(limit=1, path=path, chat_id=-1)) as first:
+                first.remember(1)
+                with closing(DeliveryHistory(limit=1, path=path, chat_id=-2)) as second:
+                    self.assertNotIn(1, second)
+                    second.remember(2)
+                    self.assertIn(1, first)
+                    self.assertNotIn(2, first)
 
     def test_rejects_an_empty_history(self):
         with self.assertRaises(ValueError):
