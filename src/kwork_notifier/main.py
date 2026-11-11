@@ -12,6 +12,7 @@ def setup_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 async def amain() -> None:
     settings = load_settings("config.ini")
@@ -23,8 +24,10 @@ async def amain() -> None:
     finally:
         try:
             await api.close()
-        except Exception:
-            logging.getLogger("kwork-tracker").exception("Failed to close Kwork API session")
+        except Exception as error:
+            logging.getLogger("kwork-tracker").warning(
+                "Failed to close Kwork API session (%s)", type(error).__name__
+            )
 
 def main() -> None:
     setup_logging()

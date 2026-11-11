@@ -85,7 +85,7 @@ async def track_new_projects(api: Kwork, bot: Bot, settings: Settings) -> None:
                     logger.info("No projects found.")
             except (asyncio.CancelledError, sqlite3.Error):
                 raise
-            except Exception:
-                logger.exception("Error while polling/sending")
+            except Exception as error:
+                logger.warning("Poll or delivery failed (%s)", type(error).__name__)
 
             await asyncio.sleep(settings.poll_interval_seconds)

@@ -133,6 +133,15 @@ class TrackerTest(unittest.IsolatedAsyncioTestCase):
         api.get_projects.assert_awaited_once()
         self.assertEqual(len(bot.messages), 1)
 
+    async def test_errors_do_not_log_request_details(self):
+        api = SimpleNamespace(get_projects=AsyncMock(side_effect=ConnectionError("secret request URL")))
+        with patch("src.kwork_notifier.tracker.asyncio.sleep", side_effect=asyncio.CancelledError):
+            with self.assertLogs("kwork-tracker", level="WARNING") as logs:
+                with self.assertRaises(asyncio.CancelledError):
+                    await track_new_projects(api, FakeBot(), self.settings)
+
+        self.assertIn("ConnectionError", logs.output[0])
+        self.assertNotIn("secret request URL", logs.output[0])
 
 
 class HistoryTest(unittest.TestCase):
