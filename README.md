@@ -1,20 +1,10 @@
 # Simple Kwork Notifier
 
-A Python bot that checks selected Kwork categories and sends new projects to a Telegram group.
-
-## How it works
-
-Each poll processes the whole returned list, oldest project first. IDs are remembered after Telegram accepts the message. Overlapping polls and repeated IDs in the same response are skipped.
-
-If sending fails, the failed project stays unacknowledged and can be retried on the next poll. Projects already delivered during that batch are skipped. A failed project must still be present in a later Kwork response to be retried.
-
-The last 2048 delivered IDs per Telegram group are saved in `deliveries.sqlite3` beside `config.ini`. Keep this file when restarting or updating the bot. A timeout after Telegram accepted a message can still cause a duplicate on retry.
-
-Long messages are shortened to fit Telegram's limit while keeping the project link.
+Checks selected Kwork categories and posts new projects to a Telegram group.
 
 ## Setup
 
-Use Python 3.10 or newer.
+Use Python 3.12 or newer.
 
 ```sh
 python -m venv .venv
@@ -25,13 +15,17 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Copy `config.example.ini` to `config.ini` and fill in the Kwork login, Telegram token and group ID. Keep `config.ini` out of Git.
-
-Run from the repository root:
+Copy `config.example.ini` to `config.ini` and fill in your Kwork login and password, Telegram bot token and group ID. Run the bot from the repository root.
 
 ```sh
 python -m src.kwork_notifier.main
 ```
+
+## Delivery
+
+The bot checks Kwork every minute and sends older projects first. It keeps the last 2048 confirmed IDs per Telegram group in `deliveries.sqlite3` next to `config.ini`. Keep the database when updating the bot. An empty database means the bot sends the projects in the first poll.
+
+If a send fails, the bot can retry it when the project appears in another poll. Telegram can accept a message just before the connection times out, so a retry may send it twice. Long messages are shortened to fit Telegram's limit and still include the project link.
 
 ## Tests
 
@@ -39,13 +33,4 @@ python -m src.kwork_notifier.main
 python -m unittest discover -s tests -v
 ```
 
-Tests use a fake bot and API. They do not load credentials or send real messages.
-
-## Files
-
-- `tracker.py`: polling, delivery history and sending.
-- `formatting.py`: message text and response activity labels.
-- `settings.py`: configuration.
-- `main.py`: application startup and logging.
-
-MIT license.
+Tests use a fake Telegram bot and Kwork API.
